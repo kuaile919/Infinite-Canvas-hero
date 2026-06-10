@@ -326,7 +326,9 @@ const DEFAULT_VIDEO_MODELS = [
     'doubao-seedance-1-5-pro-251215',
     'doubao-seedance-1-0-pro-250528',
     'doubao-seedance-1-0-lite-t2v-250428',
-    'doubao-seedance-1-0-lite-i2v-250428'
+    'doubao-seedance-1-0-lite-i2v-250428',
+    // Agnes
+    'agnes-video-v2.0'
 ];
 
 function uid(prefix='n'){ return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`; }
