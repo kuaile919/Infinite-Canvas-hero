@@ -1,6 +1,6 @@
 {
-  "version": "2026.07.04.2",
-  "updated_at": "2026-07-04T07:20:36+08:00",
+  "version": "2026.07.05",
+  "updated_at": "2026-07-05T10:57:36+08:00",
   "items": [
     {
       "type": "feature",
@@ -21,6 +21,10 @@
     {
       "type": "feature",
       "text": "支持GPT/Gemini pro个人账号，调用CLI免费生图，需要下载CLI文件夹自行安装"
+    },
+    {
+      "type": "feature",
+      "text": "修复了API设置同步异常导致的新平台生成报错bug"
     }
   ]
 }

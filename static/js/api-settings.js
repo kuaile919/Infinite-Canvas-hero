@@ -166,6 +166,7 @@ const RECOMMENDED_APIS = [
         icons:['IMG'],
         summaryKey:'api.recommendExellomeSummary',
         perks:[{key:'api.recommendExellome2k4k'}],
+        keyHint:'使用 VIP 分组',
         advantages:['稳定输出 GPT-Image2 和 Nano Banana 的 2K/4K', '异步协议适合长任务', '预填全系图像模型'],
         image_models:['gpt-image2-2k', 'gpt-image2-4k', 'Nano-Banana-2-2k', 'Nano-Banana-2-4k', 'Nano-Banana-Pro-2k', 'Nano-Banana-Pro-4k'],
         chat_models:[],
@@ -255,8 +256,25 @@ const RECOMMEND_GROUPS = [
 const LOCKED_RECOMMENDED_PROTOCOL_IDS = new Set(['exellome', 'fhl']);
 function lockedRecommendedApi(itemOrId){
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
-    if(!LOCKED_RECOMMENDED_PROTOCOL_IDS.has(id)) return null;
-    return RECOMMENDED_APIS.find(api => api.id === id) || null;
+    const name = typeof itemOrId === 'string' ? '' : itemOrId?.name;
+    const baseUrl = typeof itemOrId === 'string' ? '' : itemOrId?.base_url;
+    const normalizedId = String(id || '').trim().toLowerCase();
+    const normalizedName = String(name || '').trim().toLowerCase();
+    const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '').toLowerCase();
+    const normalizedHost = (() => {
+        try { return new URL(normalizedBase).host.toLowerCase(); } catch(e) { return ''; }
+    })();
+    return RECOMMENDED_APIS.find(api => {
+        if(!LOCKED_RECOMMENDED_PROTOCOL_IDS.has(api.id)) return false;
+        const apiBase = String(api.base_url || '').trim().replace(/\/+$/, '').toLowerCase();
+        const apiHost = (() => {
+            try { return new URL(apiBase).host.toLowerCase(); } catch(e) { return ''; }
+        })();
+        return normalizedId === api.id
+            || normalizedName === String(api.name || '').trim().toLowerCase()
+            || (apiBase && normalizedBase === apiBase)
+            || (apiHost && normalizedHost === apiHost);
+    }) || null;
 }
 function hasLockedRecommendedProtocol(itemOrId){
     return Boolean(lockedRecommendedApi(itemOrId));
@@ -2171,6 +2189,7 @@ function renderRecommendApi(){
                         <label class="onboarding-key-field onboarding-rh-row-field">
                             <span>API Key</span>
                             <input type="password" data-recommend-key="${index}" placeholder="${escapeAttr(trf('api.recommendKeyPlaceholder', {name:api.name}))}">
+                            ${api.keyHint ? `<em class="recommend-key-hint">${escapeHtml(api.keyHint)}</em>` : ''}
                         </label>
                         <button class="onboarding-save-btn recommend-guide-save-btn" type="button" onclick="saveRecommendedApi(${index})"><span>${escapeHtml(tr('api.save'))}</span></button>
                     </div>

@@ -300,7 +300,7 @@ JIMENG_DEFAULT_VIDEO_MODELS = [
     "3.0",
     "3.0fast",
 ]
-CODEX_DEFAULT_IMAGE_MODELS = ["$imagegen"]
+CODEX_DEFAULT_IMAGE_MODELS = ["gpt-image-2", "$imagegen"]
 CODEX_DEFAULT_CHAT_MODELS = ["gpt-5.5"]
 GEMINI_CLI_DEFAULT_IMAGE_MODELS = ["auto"]
 GEMINI_CLI_DEFAULT_CHAT_MODELS = ["auto"]
@@ -769,14 +769,15 @@ def default_api_providers():
         },
     ]
 
-def merge_default_api_providers(providers):
+def merge_default_api_providers(providers, inject_missing=True):
     merged = [dict(item) for item in providers]
     # 强制保留独立入口平台（不再强制 comfly）
     ms_default = next((d for d in default_api_providers() if d["id"] == "modelscope"), None)
     if ms_default:
         current = next((item for item in merged if item.get("id") == "modelscope"), None)
         if not current:
-            merged.append(ms_default)
+            if inject_missing:
+                merged.append(ms_default)
         else:
             if not current.get("base_url"):
                 current["base_url"] = ms_default["base_url"]
@@ -793,7 +794,8 @@ def merge_default_api_providers(providers):
     if rh_default:
         current = next((item for item in merged if item.get("id") == "runninghub"), None)
         if not current:
-            merged.append(rh_default)
+            if inject_missing:
+                merged.append(rh_default)
         else:
             if not current.get("base_url"):
                 current["base_url"] = rh_default["base_url"]
@@ -820,7 +822,7 @@ def merge_default_api_providers(providers):
                     "video_models": legacy_video_models,
                 }
                 merged.append(current)
-            else:
+            elif inject_missing:
                 merged.append(volc_default)
         else:
             if not current.get("base_url"):
@@ -1101,6 +1103,35 @@ def normalize_image_request_mode(value):
     mode = str(value or "").strip().lower()
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
 
+LOCKED_RECOMMENDED_PROVIDER_RULES = {
+    "exellome": {
+        "names": {"exellome"},
+        "base_urls": {"https://new.exellome.online"},
+        "protocol": "apimart",
+        "image_request_mode": "openai-video-proxy",
+    },
+    "fhl": {
+        "names": {"fhl"},
+        "base_urls": {"https://www.fhl.mom"},
+        "protocol": "openai",
+        "image_request_mode": "openai-responses",
+    },
+}
+
+def locked_recommended_provider_rule(provider_id="", name="", base_url=""):
+    pid = str(provider_id or "").strip().lower()
+    pname = str(name or "").strip().lower()
+    pbase = str(base_url or "").strip().rstrip("/").lower()
+    try:
+        phost = urllib.parse.urlsplit(pbase).netloc.lower()
+    except Exception:
+        phost = ""
+    for key, rule in LOCKED_RECOMMENDED_PROVIDER_RULES.items():
+        hosts = {urllib.parse.urlsplit(url).netloc.lower() for url in rule["base_urls"]}
+        if pid == key or pname in rule["names"] or pbase in rule["base_urls"] or (phost and phost in hosts):
+            return rule
+    return None
+
 def provider_endpoint_url(provider, key, default_path):
     base_url = str((provider or {}).get("base_url") or AI_BASE_URL).strip().rstrip("/")
     override = str((provider or {}).get(key) or "").strip()
@@ -1162,6 +1193,10 @@ def normalize_provider(item):
     if provider_id == "runninghub":
         protocol = "runninghub"
         base_url = base_url or RUNNINGHUB_DEFAULT_BASE_URL
+    locked_rule = locked_recommended_provider_rule(provider_id, name, base_url)
+    if locked_rule:
+        protocol = locked_rule["protocol"]
+        image_request_mode = locked_rule["image_request_mode"]
     return {
         "id": provider_id,
         "name": name,
@@ -1192,7 +1227,7 @@ def load_api_providers():
         with open(API_PROVIDERS_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
         providers = [normalize_provider(item) for item in raw if isinstance(item, dict)]
-        return merge_default_api_providers(providers or defaults)
+        return merge_default_api_providers(providers or defaults, inject_missing=not bool(providers))
     except Exception as e:
         print(f"加载 API 平台配置失败: {e}")
         return defaults
@@ -4233,6 +4268,270 @@ def codex_output_url_from_path(path):
         return ""
     return ""
 
+def gpt_image_2_skill_executable():
+    configured = str(codex_env_value("GPT_IMAGE_2_SKILL_BIN") or "").strip()
+    if configured:
+        return configured
+    return (
+        shutil.which("gpt-image-2-skill")
+        or shutil.which("gpt-image-2-skill.exe")
+        or shutil.which("gpt-image-2-skill.cmd")
+        or ""
+    )
+
+def gpt_image_2_skill_auth_file():
+    configured = str(codex_env_value("GPT_IMAGE_2_SKILL_AUTH_FILE") or codex_env_value("CODEX_AUTH_FILE") or "").strip()
+    if configured:
+        return configured
+    user_profile = os.getenv("USERPROFILE", "").strip()
+    candidates = [
+        os.path.join(user_profile, ".codex", "auth.json") if user_profile else "",
+        os.path.join(os.path.expanduser("~"), ".codex", "auth.json"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return candidates[0] if candidates and candidates[0] else ""
+
+def gpt_image_2_skill_auth_json(auth_file=""):
+    path = str(auth_file or "").strip()
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def gpt_image_2_skill_access_token(auth_data):
+    if not isinstance(auth_data, dict):
+        return ""
+    for key in ("access_token", "accessToken"):
+        value = str(auth_data.get(key) or "").strip()
+        if value:
+            return value
+    tokens = auth_data.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("access_token", "accessToken"):
+            value = str(tokens.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+def gpt_image_2_skill_api_key(auth_data=None):
+    for key in ("GPT_IMAGE_2_SKILL_API_KEY", "OPENAI_API_KEY"):
+        value = str(codex_env_value(key) or "").strip()
+        if value:
+            return value
+    if isinstance(auth_data, dict):
+        value = str(auth_data.get("OPENAI_API_KEY") or auth_data.get("api_key") or auth_data.get("apiKey") or "").strip()
+        if value:
+            return value
+    return ""
+
+def gpt_image_2_skill_provider_args(auth_file=""):
+    auth_data = gpt_image_2_skill_auth_json(auth_file)
+    if gpt_image_2_skill_access_token(auth_data):
+        return ["--provider", "codex", "--auth-file", auth_file] if auth_file else ["--provider", "codex"], "codex"
+    api_key = gpt_image_2_skill_api_key(auth_data)
+    if api_key:
+        return ["--provider", "openai", "--api-key", api_key], "openai"
+    return (["--provider", "codex", "--auth-file", auth_file] if auth_file else ["--provider", "codex"]), "codex"
+
+def gpt_image_2_skill_model_arg(model="", provider="openai"):
+    value = str(model or "").strip()
+    low = value.lower()
+    provider = str(provider or "").strip().lower()
+    if provider == "codex":
+        if not value or low.startswith("$imagegen") or low.startswith("gpt-image"):
+            return "gpt-5.4"
+        return value
+    if not value or low.startswith("$imagegen"):
+        return "gpt-image-2"
+    return value
+
+def gpt_image_2_skill_size_arg(size="", model="", prompt="", provider="openai"):
+    text = " ".join([str(size or ""), str(model or ""), str(prompt or "")]).lower()
+    size_text = str(size or "").strip()
+    if str(provider or "").strip().lower() == "codex":
+        if "4k" in text or "3840" in text:
+            return "4K"
+        if "1k" in text or "1024" in text:
+            return "1K"
+        width, height = parse_size_pair(size_text)
+        if max(width, height) >= 2400:
+            return "4K"
+        return "2K"
+    match = re.search(r"(\d{3,5})\s*[x×*]\s*(\d{3,5})", size_text, flags=re.I)
+    if match:
+        width = int(match.group(1))
+        height = int(match.group(2))
+        if width > 0 and height > 0:
+            return normalize_gpt_image_2_size(f"{width}x{height}")
+    ratio_match = re.fullmatch(r"\s*(\d{1,2})\s*:\s*(\d{1,2})\s*", size_text)
+    if ratio_match:
+        ratio = f"{int(ratio_match.group(1))}:{int(ratio_match.group(2))}"
+        options = CHAT_RATIO_SIZE_OPTIONS.get(ratio)
+        if options:
+            if "4k" in text or "3840" in text:
+                return options[-1]
+            if "1k" in text or "1024" in text:
+                return options[0]
+            return options[1] if len(options) > 1 else options[0]
+    if "4k" in text or "3840" in text:
+        return "4K"
+    if "1k" in text or "1024" in text:
+        return "1K"
+    return "2K"
+
+def gpt_image_2_skill_prompt_arg(prompt="", size="", provider="openai"):
+    prompt_text = str(prompt or "").strip()
+    if str(provider or "").strip().lower() != "codex":
+        return prompt_text
+    size_text = str(size or "").strip()
+    width, height = parse_size_pair(size_text)
+    ratio_text = ""
+    if width and height:
+        divisor = math.gcd(width, height) or 1
+        ratio_text = f"{width // divisor}:{height // divisor}"
+    else:
+        ratio_match = re.fullmatch(r"\s*(\d{1,2})\s*:\s*(\d{1,2})\s*", size_text)
+        if ratio_match:
+            width = int(ratio_match.group(1))
+            height = int(ratio_match.group(2))
+            ratio_text = f"{width}:{height}"
+    if not ratio_text:
+        return prompt_text
+    orientation_zh = "横版/宽幅" if width > height else ("竖版/长幅" if height > width else "正方形")
+    orientation_en = "landscape/wide" if width > height else ("portrait/tall" if height > width else "square")
+    return (
+        f"{prompt_text} "
+        f"画幅要求：必须生成 {orientation_zh} 图片，宽高比 {ratio_text}。"
+        f"请不要交换宽高，不要输出反向比例。"
+        f" Canvas requirement: generate a {orientation_en} image with aspect ratio {ratio_text}; "
+        "do not swap width and height."
+    )
+
+def parse_gpt_image_2_skill_output(stdout_text="", stderr_text=""):
+    items = []
+    for line in (stdout_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            items.append(json.loads(line))
+        except Exception:
+            continue
+    if not items and stdout_text:
+        try:
+            parsed = json.loads(stdout_text)
+            items = parsed if isinstance(parsed, list) else [parsed]
+        except Exception:
+            pass
+    paths = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        candidates = [
+            item.get("path"),
+            item.get("file"),
+            item.get("output"),
+            item.get("out"),
+            item.get("url"),
+        ]
+        for image in item.get("images") or []:
+            if isinstance(image, dict):
+                candidates.extend([image.get("path"), image.get("file"), image.get("url")])
+            else:
+                candidates.append(image)
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                paths.append(value)
+    text = stdout_text or stderr_text or ""
+    pattern = r"([A-Za-z]:\\[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif)|/[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif))"
+    paths.extend(re.findall(pattern, text, flags=re.I))
+    return items, paths
+
+async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths=None):
+    exe = gpt_image_2_skill_executable()
+    if not exe:
+        return None
+    ref_paths = [str(path) for path in (ref_paths or []) if path and os.path.isfile(str(path))]
+    auth_file = gpt_image_2_skill_auth_file()
+    provider_args, tool_provider = gpt_image_2_skill_provider_args(auth_file)
+    out_path = os.path.join(OUTPUT_OUTPUT_DIR, f"gpt_image_2_{uuid.uuid4().hex}.png")
+    mode = "edit" if ref_paths else "generate"
+    args = [
+        exe,
+        "--json",
+        "--json-events",
+    ]
+    args.extend(provider_args)
+    args.extend([
+        "images",
+        mode,
+        "--prompt",
+        gpt_image_2_skill_prompt_arg(prompt, size, tool_provider),
+        "--out",
+        out_path,
+        "--model",
+        gpt_image_2_skill_model_arg(model, tool_provider),
+        "--format",
+        "png",
+        "--size",
+        gpt_image_2_skill_size_arg(size, model, prompt, tool_provider),
+        "--quality",
+        "high",
+    ])
+    for path in ref_paths:
+        args.extend(["--ref-image", path])
+    if ref_paths and tool_provider == "openai":
+        args.extend(["--input-fidelity", "high"])
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=BASE_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=codex_timeout())
+    except asyncio.TimeoutError as exc:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        raise HTTPException(status_code=504, detail="GPT Image 2 Skill 执行超时。可设置 CODEX_CLI_TIMEOUT 增大等待时间。") from exc
+    except FileNotFoundError:
+        return None
+    out_text, err_text = codex_decode_output(stdout, stderr)
+    if proc.returncode != 0:
+        message = err_text or out_text or f"exit={proc.returncode}"
+        raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{message[:1200]}")
+    parsed, reported_paths = parse_gpt_image_2_skill_output(out_text, err_text)
+    urls = []
+    if os.path.isfile(out_path):
+        url = codex_output_url_from_path(out_path)
+        if url:
+            urls.append(url)
+    for path in reported_paths:
+        url = codex_output_url_from_path(path)
+        if url and url not in urls:
+            urls.append(url)
+    if not urls:
+        status_text = (out_text or err_text or "")[:1200]
+        raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 已返回，但没有在输出目录发现图片：{status_text}")
+    return {"type": "url", "value": urls[0]}, {
+        "images": urls,
+        "text": out_text,
+        "provider": "codex",
+        "tool": "gpt-image-2-skill",
+        "tool_provider": tool_provider,
+        "raw": parsed or {"stdout": out_text, "stderr": err_text},
+    }
+
 async def codex_prepare_local_media(ref_url):
     text = str(ref_url or "").strip()
     if not text:
@@ -4317,6 +4616,9 @@ async def generate_codex_provider_image(prompt, size, model, reference_images=No
     ref_paths, temp_paths = await codex_reference_paths(reference_images)
     since = time.time()
     try:
+        skill_result = await generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths)
+        if skill_result:
+            return skill_result
         image_prompt = (
             "$imagegen\n\n"
             f"任务：{prompt}\n\n"
@@ -11117,10 +11419,13 @@ async def runninghub_upload_asset(payload: RunningHubUploadAssetRequest):
 @app.get("/api/codex/status")
 async def codex_status():
     exe = codex_cli_executable()
+    image2_exe = gpt_image_2_skill_executable()
     if not exe:
         return {
             "installed": False,
             "logged_in": False,
+            "image2_helper_installed": bool(image2_exe),
+            "image2_helper_path": image2_exe,
             "message": "未找到 OpenAI Codex CLI，请先安装。",
         }
     try:
@@ -11134,12 +11439,15 @@ async def codex_status():
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
         out_text, err_text = codex_decode_output(stdout, stderr)
         ok = proc.returncode == 0
+        helper_message = "GPT Image 2 helper 已安装，OpenAI CLI 生图会优先使用 Image 2。" if image2_exe else "未找到 GPT Image 2 helper，OpenAI CLI 生图会回退 Codex 内置 $imagegen。"
         return {
             "installed": ok,
             "logged_in": None,
             "version": out_text or err_text,
             "path": exe,
-            "message": "OpenAI Codex CLI 已安装。登录状态会在首次执行 codex exec 时由 CLI 校验。" if ok else (err_text or out_text or "Codex CLI 检测失败"),
+            "image2_helper_installed": bool(image2_exe),
+            "image2_helper_path": image2_exe,
+            "message": f"OpenAI Codex CLI 已安装。{helper_message} 登录状态会在首次执行 codex exec 时由 CLI 校验。" if ok else (err_text or out_text or "Codex CLI 检测失败"),
             "raw": {"stdout": out_text, "stderr": err_text, "returncode": proc.returncode},
         }
     except Exception as exc:
@@ -11147,6 +11455,8 @@ async def codex_status():
             "installed": False,
             "logged_in": False,
             "path": exe,
+            "image2_helper_installed": bool(image2_exe),
+            "image2_helper_path": image2_exe,
             "message": f"Codex CLI 检测失败：{exc}",
         }
 
